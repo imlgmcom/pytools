@@ -242,6 +242,7 @@ def main():
         print("3. 清理所有desktop.ini及备份文件")
         print("4. 刷新文件夹视图（立即显示更改）")
         print("5. 退出")
+        print("\n*如需文件夹重命名，请先清理desktop.ini然后在进行重命名操作\n")
         
         try:
             choice = input("请选择操作 (1-5): ")
