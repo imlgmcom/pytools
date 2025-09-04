@@ -3,516 +3,835 @@ import sys
 import subprocess
 import configparser
 import time
-import msvcrt  # 用于捕获空格键
+import msvcrt
+import shutil
+import datetime
+import ctypes
+from ctypes import wintypes
 import win32api
 import win32con
 from win32com.shell.shell import SHChangeNotify
 from win32com.shell import shellcon
 
-# 全局变量：存储用户选择的操作目录
+# 版本信息
+VERSION = "v25.10.8 by DouBaoAi (修复缓存生成)"
+
+# 全局变量
 OPERATE_DIR = ""
+FOLDERS_TXT_NAME = "folders.txt"
+EXCLUDE_KEYWORDS = ["uninstall", "step"]
+FOLDERS_ENCODING = "gbk"  # Windows中文系统ANSI编码对应gbk
 
-# 配置参数
-EXCLUDE_EXE_KEYWORD = "uninstall"
-ICON_EXTENSION = ".ico"
-DEFAULT_ICON_SIZE = (48, 48)
 
-# 等待空格键确认
+# ------------------------------
+# Windows API 基础定义
+# ------------------------------
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+
+# 用于图标缓存的结构体和常量
+class SHFILEINFO(ctypes.Structure):
+    _fields_ = [
+        ("hIcon", wintypes.HICON),
+        ("iIcon", ctypes.c_int),
+        ("dwAttributes", wintypes.DWORD),
+        ("szDisplayName", ctypes.c_char * 260),
+        ("szTypeName", ctypes.c_char * 80),
+    ]
+
+SHGFI_ICON = 0x000000100
+SHGFI_SMALLICON = 0x000000001
+SHGFI_LARGEICON = 0x000000000
+SHGFI_USEFILEATTRIBUTES = 0x000000010
+FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+
+
+# ------------------------------
+# 基础工具函数
+# ------------------------------
 def wait_for_space():
+    """等待空格键确认，统一交互体验"""
     print("按空格键继续...", end='', flush=True)
     while True:
-        key = msvcrt.getch()
-        if key == b' ':
-            print()  # 换行
+        if msvcrt.getch() == b' ':
+            print()
             break
 
-# 依赖检查
-def check_dependency(module_name, install_name=None):
-    install_name = install_name or module_name
-    try:
-        __import__(module_name)
-        return True
-    except ImportError:
-        print(f"缺失依赖：{install_name}，正在安装...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", install_name])
-            __import__(module_name)
-            return True
-        except:
-            print(f"手动安装命令：pip install {install_name}")
-            return False
 
-# 目录选择函数
+def check_dependency():
+    """检查并自动安装pywin32依赖"""
+    required = [
+        ("win32api", "pywin32"),
+        ("win32com.shell", "pywin32")
+    ]
+    print("=" * 40)
+    print(f"          检查核心依赖 - {VERSION}          ")
+    print("=" * 40)
+    
+    for module, install_name in required:
+        try:
+            __import__(module)
+            print(f"✅ {module} 已安装")
+        except ImportError:
+            print(f"⚠️  缺失 {install_name}，正在自动安装...")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", install_name],
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                __import__(module)
+                print(f"✅ {install_name} 安装成功")
+            except Exception as e:
+                print(f"❌ 安装失败，请手动执行：pip install {install_name}")
+                return False
+    return True
+
+
 def select_operate_directory():
-    print("===== 请选择操作目录 =====")
+    """选择操作目录并保存到全局变量"""
+    global OPERATE_DIR
+    print("=" * 40)
+    print("          请选择操作目录          ")
+    print("=" * 40)
     while True:
         try:
-            print("1. 使用当前目录（脚本所在目录）")
+            print(f"1. 使用当前目录（{os.getcwd()}）")
             print("2. 手动指定路径")
-            choice = input("请选择(1-2)：").strip()
+            choice = input("请输入选择（1/2）：").strip()
             
             if choice == '1':
                 current_dir = os.getcwd()
-                print(f"已选择当前目录：{current_dir}")
+                print(f"\n✅ 已选择当前目录：{current_dir}")
+                OPERATE_DIR = current_dir
                 return current_dir
             elif choice == '2':
-                while True:
-                    path = input("请输入目标目录路径（直接回车返回上一级）：").strip()
-                    if not path:
-                        break
-                    if os.path.isdir(path):
-                        print(f"已选择目录：{path}")
-                        return path
-                    else:
-                        print(f"错误：路径不存在或不是有效目录")
+                path = input("\n请输入目录路径：").strip().strip('"')
+                if os.path.isdir(path):
+                    print(f"✅ 已选择目录：{path}")
+                    OPERATE_DIR = path
+                    return path
+                else:
+                    print("❌ 路径无效，请重新输入")
             else:
-                print("无效选择，请输入1或2")
+                print("❌ 请输入 1 或 2")
         except Exception as e:
-            print(f"目录选择出错：{str(e)}")
+            print(f"❌ 目录选择出错：{str(e)}")
             wait_for_space()
 
-# 必须依赖检查
-required_deps = [
-    ("win32gui", "pywin32"),
-    ("PIL", "pillow"),
-    ("win32com.shell", "pywin32")
-]
-for module, install_name in required_deps:
-    if not check_dependency(module, install_name):
-        print("依赖安装失败，按空格键退出...", end='', flush=True)
-        while True:
-            if msvcrt.getch() == b' ':
-                sys.exit(1)
-
-# 导入其他所需模块
-import win32gui
-import win32ui
-from win32con import DI_NORMAL
-from PIL import Image
 
 # ------------------------------
-# 核心图标提取方法（简化版，优先保证图标正确）
+# 缓存生成与刷新核心功能
 # ------------------------------
-def get_exe_icon(exe_path, output_path):
+def trigger_icon_cache(folder_path):
+    """触发单个文件夹的图标缓存生成（增强版，多方法确保成功）"""
+    folder_path = os.path.abspath(folder_path)
+    success = False
+    
     try:
-        # 提取图标（使用最基础的方法，确保能获取到图标）
-        large_icons, _ = win32gui.ExtractIconEx(exe_path, 0)
-        if not large_icons:
-            return False, "无大图标资源"
-        
-        hicon = large_icons[0]
-        hdc_screen = None
-        hdc = None
-        hdc_mem = None
-        hbmp = None
-        
-        try:
-            # 基础设备上下文设置（避免复杂参数）
-            hdc_screen = win32gui.GetDC(0)
-            hdc = win32ui.CreateDCFromHandle(hdc_screen)
-            hbmp = win32ui.CreateBitmap()
-            hbmp.CreateCompatibleBitmap(hdc, DEFAULT_ICON_SIZE[0], DEFAULT_ICON_SIZE[1])
-            hdc_mem = hdc.CreateCompatibleDC()
-            hdc_mem.SelectObject(hbmp)
-
-            # 基础绘制（不使用复杂渲染参数，确保图标能被正确绘制）
-            win32gui.DrawIconEx(
-                hdc_mem.GetSafeHdc(), 0, 0, hicon,
-                DEFAULT_ICON_SIZE[0], DEFAULT_ICON_SIZE[1],
-                0, None, DI_NORMAL  # 仅使用基础参数
-            )
-
-            # 提取位图数据（使用原始格式，避免模式转换错误）
-            bmp_info = hbmp.GetInfo()
-            bmp_str = hbmp.GetBitmapBits(True)
-            
-            # 基础转换（使用BGRX模式，这是之前能正常工作的模式）
-            img = Image.frombuffer(
-                'RGB', 
-                (bmp_info['bmWidth'], bmp_info['bmHeight']),
-                bmp_str, 
-                'raw', 
-                'BGRX', 0, 1  # 还原为之前能正确提取图标的模式
-            ).convert('RGBA')  # 转为RGBA以添加透明通道
-
-            # 简单透明处理：保留图像本身的透明信息（如果有）
-            # 不做复杂合成，避免破坏原始图标
-            img.save(
-                output_path, 
-                format='ICO', 
-                sizes=[DEFAULT_ICON_SIZE, (32,32)]
-            )
-            return True, "提取成功（基础透明处理）"
-        
-        finally:
-            # 清理资源
-            if hicon:
-                win32gui.DestroyIcon(hicon)
-            if hdc_mem:
-                hdc_mem.DeleteDC()
-            if hbmp:
-                win32gui.DeleteObject(hbmp.GetHandle())
-            if hdc_screen:
-                win32gui.ReleaseDC(0, hdc_screen)
-    except Exception as e:
-        return False, f"提取失败：{str(e)}"
-
-# ------------------------------
-# 其他函数保持不变（空格确认、刷新等）
-# ------------------------------
-def refresh_folder(folder_path):
-    try:
-        if not isinstance(folder_path, str):
-            folder_path = str(folder_path)
-        
+        # 方法1：获取小图标和大图标，强制系统缓存
+        shfi_small = SHFILEINFO()
+        shfi_large = SHFILEINFO()
         folder_path_bytes = os.fsencode(folder_path)
         
-        win32api.SetFileAttributes(folder_path, win32con.FILE_ATTRIBUTE_SYSTEM)
+        # 获取小图标
+        result_small = shell32.SHGetFileInfo(
+            folder_path_bytes,
+            FILE_ATTRIBUTE_DIRECTORY,
+            ctypes.byref(shfi_small),
+            ctypes.sizeof(shfi_small),
+            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES
+        )
+        
+        # 获取大图标
+        result_large = shell32.SHGetFileInfo(
+            folder_path_bytes,
+            FILE_ATTRIBUTE_DIRECTORY,
+            ctypes.byref(shfi_large),
+            ctypes.sizeof(shfi_large),
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES
+        )
+        
+        # 释放图标资源
+        if shfi_small.hIcon:
+            user32.DestroyIcon(shfi_small.hIcon)
+        if shfi_large.hIcon:
+            user32.DestroyIcon(shfi_large.hIcon)
+            
+        success = result_small != 0 or result_large != 0
+        
+        # 方法2：修改文件夹属性触发缓存（如果方法1失败）
+        if not success:
+            attr = win32api.GetFileAttributes(folder_path)
+            # 先设置为只读
+            win32api.SetFileAttributes(folder_path, win32con.FILE_ATTRIBUTE_READONLY)
+            time.sleep(0.1)  # 短暂延迟确保系统捕获变化
+            # 恢复原属性
+            win32api.SetFileAttributes(folder_path, attr)
+            success = True
+            
+        # 方法3：创建并删除临时文件触发目录刷新（如果前两种方法失败）
+        if not success:
+            temp_file = os.path.join(folder_path, "temp_icon_refresh.tmp")
+            try:
+                with open(temp_file, 'w') as f:
+                    f.write("temp file to trigger refresh")
+                os.remove(temp_file)
+                success = True
+            except:
+                pass
+                
+        return success
+        
+    except Exception as e:
+        print(f"   ⚠️  缓存触发异常: {str(e)}")
+        return False
+
+
+def refresh_folder(folder_path):
+    """刷新单个文件夹并触发缓存生成（增强版）"""
+    try:
+        folder_path = os.path.abspath(folder_path)
+        folder_name = os.path.basename(folder_path)
+        
+        # 步骤1：通知系统文件夹属性已更新
         SHChangeNotify(
             shellcon.SHCNE_UPDATEDIR,
             shellcon.SHCNF_PATH | shellcon.SHCNF_FLUSH,
-            folder_path_bytes,
+            os.fsencode(folder_path),
             None
         )
-        time.sleep(0.1)
+        
+        # 步骤2：设置为系统文件夹属性（触发系统关注）
+        original_attr = win32api.GetFileAttributes(folder_path)
+        win32api.SetFileAttributes(folder_path, original_attr | win32con.FILE_ATTRIBUTE_SYSTEM)
+        
+        # 步骤3：多次尝试触发图标缓存生成（最多3次）
+        cache_success = False
+        for attempt in range(3):
+            cache_success = trigger_icon_cache(folder_path)
+            if cache_success:
+                break
+            time.sleep(0.2)  # 等待重试
+            
+        # 步骤4：恢复原始属性
+        win32api.SetFileAttributes(folder_path, original_attr)
+        
+        # 步骤5：再次通知系统更新
+        SHChangeNotify(
+            shellcon.SHCNE_UPDATEDIR,
+            shellcon.SHCNF_PATH | shellcon.SHCNF_FLUSH,
+            os.fsencode(folder_path),
+            None
+        )
+        
+        return True, cache_success
+    except Exception as e:
+        print(f"   ❌ 刷新失败: {str(e)}")
+        return False, False
+
+
+def refresh_system_icon_cache():
+    """刷新系统图标缓存（修复任务栏显示问题）"""
+    try:
+        print("\n" + "-" * 40)
+        print("          刷新系统图标缓存          ")
+        print("-" * 40)
+        
+        # 缓存文件路径
+        cache_paths = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "IconCache.db"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "AppData\\Local\\Microsoft\\Windows\\Explorer\\iconcache*")
+        ]
+        
+        # 终止资源管理器进程
+        print("   终止资源管理器进程...")
+        subprocess.run(["taskkill", "/f", "/im", "explorer.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+        
+        # 删除缓存文件
+        for path in cache_paths:
+            try:
+                if "*" in path:
+                    import glob
+                    for f in glob.glob(path):
+                        if os.path.exists(f):
+                            os.remove(f)
+                            print(f"   删除缓存：{f}")
+                elif os.path.exists(path):
+                    os.remove(path)
+                    print(f"   删除缓存：{path}")
+            except Exception as e:
+                print(f"   缓存删除失败 {path}：{str(e)}")
+        
+        # 额外清理：重建图标缓存数据库
+        print("   重建系统图标缓存...")
+        subprocess.run(
+            ["ie4uinit.exe", "-ClearIconCache"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(1)
+        
+        # 修复任务栏显示：先启动系统外壳，再打开工作目录
+        print("   重启资源管理器（系统外壳）...")
+        subprocess.Popen(["explorer.exe"])  # 不带参数启动，优先恢复系统外壳（包括任务栏）
+        time.sleep(2)  # 等待系统外壳完全启动
+        
+        # 单独打开工作目录
+        if OPERATE_DIR and os.path.isdir(OPERATE_DIR):
+            print(f"   打开工作目录：{OPERATE_DIR}")
+            subprocess.Popen(["explorer.exe", OPERATE_DIR])
+            time.sleep(1)
+        
+        print("✅ 系统图标缓存已重建，任务栏已恢复")
         return True
     except Exception as e:
-        print(f"刷新文件夹失败：{str(e)}")
+        print(f"⚠️  系统缓存刷新失败：{str(e)}")
+        # 确保资源管理器重启
+        subprocess.Popen(["explorer.exe"])
+        time.sleep(1)
+        subprocess.Popen(["explorer.exe", OPERATE_DIR])
         return False
 
+
+# ------------------------------
+# 文件操作相关函数
+# ------------------------------
 def ensure_file_writable(file_path):
+    """确保文件可写"""
     try:
         if os.path.exists(file_path):
             attrs = win32api.GetFileAttributes(file_path)
-            new_attrs = attrs & ~(
-                win32con.FILE_ATTRIBUTE_SYSTEM | 
-                win32con.FILE_ATTRIBUTE_HIDDEN | 
-                win32con.FILE_ATTRIBUTE_READONLY
+            win32api.SetFileAttributes(
+                file_path, 
+                attrs & ~(win32con.FILE_ATTRIBUTE_READONLY | win32con.FILE_ATTRIBUTE_SYSTEM)
             )
-            win32api.SetFileAttributes(file_path, new_attrs)
         return True
     except Exception as e:
-        print(f"警告：无法修改文件属性 {file_path} - {str(e)}")
+        print(f"⚠️  无法修改属性 {os.path.basename(file_path)}：{str(e)}")
         return False
 
-def generate_folders_txt():
+
+def get_valid_exes(folder_path):
+    """获取有效EXE文件（返回绝对路径和相对路径的元组）"""
+    exes = []
+    folder_abs = os.path.abspath(folder_path)
+    for root, _, files in os.walk(folder_abs):
+        for file in files:
+            if file.lower().endswith('.exe') and not any(kw in file.lower() for kw in EXCLUDE_KEYWORDS):
+                abs_path = os.path.abspath(os.path.join(root, file))
+                rel_path = os.path.relpath(abs_path, folder_abs)
+                exes.append( (abs_path, rel_path) )
+    # 去重（基于绝对路径）
+    seen = set()
+    return [ (abs_p, rel_p) for abs_p, rel_p in exes if not (abs_p in seen or seen.add(abs_p)) ]
+
+
+# ------------------------------
+# 备份功能
+# ------------------------------
+def backup_folders_txt():
+    current_dir = OPERATE_DIR
+    txt_path = os.path.join(current_dir, FOLDERS_TXT_NAME)
+    
+    if os.path.exists(txt_path):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(current_dir, f"folders-{timestamp}.txt")
+        try:
+            shutil.copy2(txt_path, backup_path)
+            print(f"✅ 已备份 {FOLDERS_TXT_NAME} 到：{backup_path}")
+        except Exception as e:
+            print(f"⚠️  备份失败：{str(e)}，仍将继续操作")
+    else:
+        print("ℹ️  未找到现有配置文件，无需备份")
+
+
+# ------------------------------
+# folders.txt 生成与更新功能
+# ------------------------------
+def generate_folders_txt_interactive():
+    """交互生成folders.txt（存储相对路径）"""
     try:
-        print("\n----- 开始生成folders.txt -----")
-        current_dir = OPERATE_DIR
-        if not current_dir or not os.path.isdir(current_dir):
-            print("错误：操作目录无效")
-            return
+        print("\n" + "-" * 40)
+        print("          交互生成 folders.txt（相对路径版）          ")
+        print("-" * 40)
+        backup_folders_txt()
         
-        folders = [f for f in os.listdir(current_dir) if os.path.isdir(os.path.join(current_dir, f)) and not f.startswith('.')]
+        current_dir = OPERATE_DIR
+        txt_path = os.path.join(current_dir, FOLDERS_TXT_NAME)
+        folders = [
+            f for f in os.listdir(current_dir)
+            if os.path.isdir(os.path.join(current_dir, f)) and not f.startswith('.')
+        ]
         if not folders:
-            print("无可用文件夹")
+            print("ℹ️  没有找到可处理的文件夹")
             return
 
-        folders_txt_path = os.path.join(current_dir, 'folders.txt')
-        with open(folders_txt_path, 'w', encoding='utf-8') as f:
-            f.write("# [文件夹名]\n# LocalizedResourceName=显示名\n# IconResource=EXE相对路径\n\n")
+        if os.path.exists(txt_path):
+            confirm = input(f"⚠️  即将覆盖现有 {FOLDERS_TXT_NAME}，是否继续？(y/n)：").strip().lower()
+            if confirm != 'y':
+                print("ℹ️  已取消生成")
+                return
+
+        with open(txt_path, 'w', encoding=FOLDERS_ENCODING) as f:
+            f.write("# 文件夹图标配置文件（存储相对路径）\n")
+            f.write("# 格式：\n")
+            f.write("# [文件夹名]\n")
+            f.write("# LocalizedResourceName=显示名（别名，可修改）\n")
+            f.write("# IconResource=EXE文件相对路径（相对于文件夹本身）\n\n")
+            
+            total = len(folders)
+            for i, folder in enumerate(folders, 1):
+                print(f"\n[{i}/{total}] 处理文件夹：{folder}")
+                folder_path = os.path.join(current_dir, folder)
+                exes = get_valid_exes(folder_path)
+                
+                if not exes:
+                    print(f"   ⚠️  未找到有效EXE，跳过")
+                    continue
+                
+                selected_abs = None
+                selected_rel = None
+                if len(exes) == 1:
+                    abs_path, rel_path = exes[0]
+                    print(f"   找到1个有效EXE（相对路径）：{rel_path}")
+                    print(f"   对应绝对路径：{abs_path}")
+                    selected_abs = abs_path
+                    selected_rel = rel_path
+                else:
+                    print(f"   找到{len(exes)}个有效EXE，请选择：")
+                    for j, (abs_path, rel_path) in enumerate(exes, 1):
+                        print(f"   {j}. 相对路径：{rel_path}")
+                        print(f"      绝对路径：{abs_path}")
+                    while True:
+                        try:
+                            choice = input(f"   请输入序号（1-{len(exes)}，0=跳过）：").strip()
+                            num = int(choice)
+                            if num == 0:
+                                break
+                            if 1 <= num <= len(exes):
+                                selected_abs, selected_rel = exes[num-1]
+                                print(f"   已选择相对路径：{selected_rel}")
+                                break
+                            else:
+                                print(f"   请输入1到{len(exes)}之间的数字")
+                        except ValueError:
+                            print("   请输入有效数字")
+                
+                if selected_rel:
+                    f.write(f"[{folder}]\n")
+                    f.write(f"LocalizedResourceName={folder}\n")
+                    f.write(f"IconResource={selected_rel}\n\n")
+                    print(f"   ✅ 已添加到配置")
+        
+        print(f"\n✅ 成功生成 {txt_path}（编码：{FOLDERS_ENCODING}）")
+        print(f"⚠️  提示：请执行选项6刷新图标以生效")
+    except Exception as e:
+        print(f"❌ 生成失败：{str(e)}")
+    finally:
+        wait_for_space()
+
+
+def generate_folders_txt_auto():
+    """自动生成folders.txt（存储相对路径）"""
+    try:
+        print("\n" + "-" * 40)
+        print("          自动生成 folders.txt（相对路径版）          ")
+        print("-" * 40)
+        backup_folders_txt()
+        
+        current_dir = OPERATE_DIR
+        txt_path = os.path.join(current_dir, FOLDERS_TXT_NAME)
+        folders = [
+            f for f in os.listdir(current_dir)
+            if os.path.isdir(os.path.join(current_dir, f)) and not f.startswith('.')
+        ]
+        if not folders:
+            print("ℹ️  没有找到可处理的文件夹")
+            return
+
+        if os.path.exists(txt_path):
+            confirm = input(f"⚠️  即将覆盖现有 {FOLDERS_TXT_NAME}，是否继续？(y/n)：").strip().lower()
+            if confirm != 'y':
+                print("ℹ️  已取消生成")
+                return
+
+        with open(txt_path, 'w', encoding=FOLDERS_ENCODING) as f:
+            f.write("# 文件夹图标配置文件（自动生成，存储相对路径）\n")
+            f.write("# 格式：\n")
+            f.write("# [文件夹名]\n")
+            f.write("# LocalizedResourceName=显示名\n")
+            f.write("# IconResource=EXE文件相对路径（相对于文件夹本身）\n\n")
+            
+            total = len(folders)
+            processed = 0
             for folder in folders:
                 folder_path = os.path.join(current_dir, folder)
-                exes = []
-                for root, _, files in os.walk(folder_path):
-                    for file in files:
-                        if file.lower().endswith('.exe') and EXCLUDE_EXE_KEYWORD not in file.lower():
-                            rel_exe_path = os.path.relpath(os.path.join(root, file), folder_path)
-                            exes.append(rel_exe_path)
-                exe = exes[0] if exes else ''
-                f.write(f"[{folder}]\nLocalizedResourceName={folder}\nIconResource={exe}\n\n")
-        print(f"成功生成folders.txt到：{folders_txt_path}")
-    except Exception as e:
-        print(f"生成folders.txt失败：{str(e)}")
-    finally:
-        wait_for_space()
-
-def batch_extract_icons():
-    try:
-        print("\n----- 开始批量提取图标 -----")
-        current_dir = OPERATE_DIR
-        folders_txt_path = os.path.join(current_dir, 'folders.txt')
-        if not os.path.exists(folders_txt_path):
-            print("错误：未找到folders.txt，请先执行步骤1")
-            return
-
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        config.read(folders_txt_path, encoding='utf-8')
-        success = 0
-        total = len(config.sections())
-
-        if total == 0:
-            print("错误：folders.txt中没有配置任何文件夹")
-            return
-
-        for folder in config.sections():
-            folder_path = os.path.join(current_dir, folder)
-            exe_rel_path = config.get(folder, 'IconResource', fallback='')
-            if not exe_rel_path or not exe_rel_path.lower().endswith('.exe'):
-                print(f"[{folder}] 无有效EXE，跳过")
-                continue
-
-            exe_abs_path = os.path.join(folder_path, exe_rel_path)
-            if not os.path.exists(exe_abs_path):
-                print(f"[{folder}] EXE不存在：{exe_rel_path}")
-                continue
-
-            exe_basename = os.path.basename(exe_rel_path)
-            ico_abs_path = os.path.join(folder_path, f"{os.path.splitext(exe_basename)[0]}{ICON_EXTENSION}")
-            
-            print(f"\n处理：{folder} → {exe_rel_path}")
-            ok, msg = get_exe_icon(exe_abs_path, ico_abs_path)
-            if ok:
-                success += 1
-                print(f"✅ 图标生成到：{os.path.relpath(ico_abs_path, folder_path)}")
-            else:
-                # 生成默认图标（仅在提取失败时）
-                from PIL import ImageDraw, ImageFont
-                img = Image.new('RGBA', DEFAULT_ICON_SIZE, (240,240,240,255))
-                draw = ImageDraw.Draw(img)
-                try:
-                    font = ImageFont.truetype("simsun", 14)
-                except:
-                    font = ImageFont.load_default()
-                draw.text((5,15), folder[:4], font=font, fill=(0,0,0,255))
-                img.save(ico_abs_path, format='ICO', sizes=[DEFAULT_ICON_SIZE, (32,32)])
-                print(f"⚠️ {msg}，已生成默认图标")
-
-        print(f"\n批量提取完成：成功{success}/{total}")
-    except Exception as e:
-        print(f"批量提取图标失败：{str(e)}")
-    finally:
-        wait_for_space()
-
-def generate_desktop_ini():
-    try:
-        print("\n----- 开始生成desktop.ini -----")
-        current_dir = OPERATE_DIR
-        folders_txt_path = os.path.join(current_dir, 'folders.txt')
-        if not os.path.exists(folders_txt_path):
-            print("错误：未找到folders.txt，请先执行步骤1")
-            return
-
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        config.read(folders_txt_path, encoding='utf-8')
-        processed = 0
-        updated_folders = set()
-
-        for folder in config.sections():
-            folder_abs_path = os.path.join(current_dir, folder)
-            ini_abs_path = os.path.join(folder_abs_path, "desktop.ini")
-            
-            exe_rel_path = config.get(folder, 'IconResource', fallback='')
-            display_name = config.get(folder, 'LocalizedResourceName', fallback=folder)
-            if not exe_rel_path.endswith('.exe'):
-                continue
-
-            if not os.access(folder_abs_path, os.W_OK):
-                print(f"[{folder}] 文件夹无写入权限，跳过")
-                continue
-
-            if not ensure_file_writable(ini_abs_path):
-                continue
-
-            exe_basename = os.path.basename(exe_rel_path)
-            ico_filename = f"{os.path.splitext(exe_basename)[0]}{ICON_EXTENSION}"
-            ico_abs_path = os.path.join(folder_abs_path, ico_filename)
-            
-            if not os.path.exists(ico_abs_path):
-                print(f"[{folder}] 图标文件不存在，跳过")
-                continue
-            
-            try:
-                with open(ini_abs_path, 'w', encoding='ANSI', newline='\r\n') as f:
-                    f.write("[.ShellClassInfo]\r\n")
-                    f.write(f"LocalizedResourceName={display_name}\r\n")
-                    f.write(f"IconFile={ico_filename}\r\n")
-                    f.write("IconIndex=0\r\n")
-                print(f"[{folder}] 已写入desktop.ini")
-            except Exception as e:
-                print(f"[{folder}] 写入desktop.ini失败：{str(e)}")
-                continue
-
-            try:
-                win32api.SetFileAttributes(
-                    ini_abs_path, 
-                    win32con.FILE_ATTRIBUTE_HIDDEN | win32con.FILE_ATTRIBUTE_SYSTEM
-                )
-                print(f"[{folder}] 已设置文件属性")
-                updated_folders.add(folder_abs_path)
-                processed += 1
-            except Exception as e:
-                print(f"[{folder}] 设置属性失败：{str(e)}")
-
-        if updated_folders:
-            print("\n开始批量刷新文件夹视图...")
-            for folder in updated_folders:
-                refresh_folder(folder)
-            print(f"已刷新 {len(updated_folders)} 个文件夹")
+                exes = get_valid_exes(folder_path)
+                
+                if exes:
+                    selected_abs, selected_rel = exes[0]
+                    f.write(f"[{folder}]\n")
+                    f.write(f"LocalizedResourceName={folder}\n")
+                    f.write(f"IconResource={selected_rel}\n\n")
+                    processed += 1
+                    print(f"✅ 处理：{folder}（相对路径：{selected_rel}）")
+                else:
+                    print(f"⚠️  跳过：{folder}（无有效EXE）")
         
-        print(f"\ndesktop.ini生成完成，成功处理 {processed} 个文件夹")
+        print(f"\n✅ 成功生成 {txt_path}（编码：{FOLDERS_ENCODING}）")
+        print(f"⚠️  提示：请执行选项6刷新图标以生效")
     except Exception as e:
-        print(f"生成desktop.ini失败：{str(e)}")
+        print(f"❌ 生成失败：{str(e)}")
     finally:
         wait_for_space()
+
+
+def update_folders_txt_interactive():
+    """交互更新folders.txt（仅添加新文件夹）"""
+    try:
+        print("\n" + "-" * 40)
+        print("          交互更新 folders.txt（相对路径版）          ")
+        print("-" * 40)
+        backup_folders_txt()
+        
+        current_dir = OPERATE_DIR
+        txt_path = os.path.join(current_dir, FOLDERS_TXT_NAME)
+        existing_folders = set()
+        
+        if os.path.exists(txt_path):
+            config = configparser.ConfigParser()
+            config.optionxform = str
+            try:
+                with open(txt_path, 'r', encoding=FOLDERS_ENCODING) as f:
+                    config.read_file(f)
+                existing_folders = set(config.sections())
+                print(f"ℹ️  检测到现有配置，包含 {len(existing_folders)} 个文件夹")
+            except Exception as e:
+                print(f"⚠️  读取现有配置失败：{str(e)}，将创建新文件")
+        
+        all_folders = [
+            f for f in os.listdir(current_dir)
+            if os.path.isdir(os.path.join(current_dir, f)) and not f.startswith('.')
+        ]
+        new_folders = [f for f in all_folders if f not in existing_folders]
+        
+        if not new_folders:
+            print("ℹ️  没有检测到新文件夹，无需更新")
+            return
+
+        with open(txt_path, 'a', encoding=FOLDERS_ENCODING) as f:
+            if not os.path.exists(txt_path) or os.path.getsize(txt_path) == 0:
+                f.write("# 文件夹图标配置文件（存储相对路径）\n")
+                f.write("# 格式：\n")
+                f.write("# [文件夹名]\n")
+                f.write("# LocalizedResourceName=显示名\n")
+                f.write("# IconResource=EXE文件相对路径\n\n")
+            elif new_folders:
+                f.write("\n")
+            
+            total = len(new_folders)
+            for i, folder in enumerate(new_folders, 1):
+                print(f"\n[{i}/{total}] 处理新文件夹：{folder}")
+                folder_path = os.path.join(current_dir, folder)
+                exes = get_valid_exes(folder_path)
+                
+                if not exes:
+                    print(f"   ⚠️  未找到有效EXE，跳过")
+                    continue
+                
+                selected_abs = None
+                selected_rel = None
+                if len(exes) == 1:
+                    abs_path, rel_path = exes[0]
+                    print(f"   找到1个有效EXE（相对路径）：{rel_path}")
+                    print(f"   对应绝对路径：{abs_path}")
+                    selected_abs = abs_path
+                    selected_rel = rel_path
+                else:
+                    print(f"   找到{len(exes)}个有效EXE，请选择：")
+                    for j, (abs_path, rel_path) in enumerate(exes, 1):
+                        print(f"   {j}. 相对路径：{rel_path}")
+                        print(f"      绝对路径：{abs_path}")
+                    while True:
+                        try:
+                            choice = input(f"   请输入序号（1-{len(exes)}，0=跳过）：").strip()
+                            num = int(choice)
+                            if num == 0:
+                                break
+                            if 1 <= num <= len(exes):
+                                selected_abs, selected_rel = exes[num-1]
+                                print(f"   已选择相对路径：{selected_rel}")
+                                break
+                            else:
+                                print(f"   请输入1到{len(exes)}之间的数字")
+                        except ValueError:
+                            print("   请输入有效数字")
+                
+                if selected_rel:
+                    f.write(f"[{folder}]\n")
+                    f.write(f"LocalizedResourceName={folder}\n")
+                    f.write(f"IconResource={selected_rel}\n\n")
+                    print(f"   ✅ 已添加到配置")
+        
+        print(f"\n✅ 成功更新 {txt_path}（编码：{FOLDERS_ENCODING}）")
+        print(f"⚠️  提示：请执行选项6刷新图标以生效")
+    except Exception as e:
+        print(f"❌ 更新失败：{str(e)}")
+    finally:
+        wait_for_space()
+
+
+# ------------------------------
+# desktop.ini 生成与清理功能
+# ------------------------------
+def generate_desktop_ini():
+    """生成desktop.ini（不自动刷新）"""
+    try:
+        print("\n" + "-" * 60)
+        print("          生成 desktop.ini（不自动刷新）          ")
+        print("-" * 60)
+        current_dir = OPERATE_DIR
+        txt_path = os.path.join(current_dir, FOLDERS_TXT_NAME)
+        
+        if not os.path.exists(txt_path):
+            print(f"❌ 错误：未找到配置文件 {txt_path}")
+            return
+
+        config = configparser.ConfigParser(allow_no_value=True)
+        config.optionxform = str  # 保持大小写
+        try:
+            with open(txt_path, 'r', encoding=FOLDERS_ENCODING) as f:
+                config.read_file(f)
+            print(f"✅ 成功读取配置（编码：{FOLDERS_ENCODING}）：{txt_path}")
+        except UnicodeDecodeError:
+            print(f"❌ 编码错误：请将 {FOLDERS_TXT_NAME} 保存为 {FOLDERS_ENCODING} 格式")
+            return
+        except Exception as e:
+            print(f"❌ 读取配置失败：{str(e)}")
+            return
+
+        folder_names = config.sections()
+        total = len(folder_names)
+        if total == 0:
+            print(f"❌ 配置文件中没有任何文件夹")
+            return
+
+        processed = 0
+        for folder_name in folder_names:
+            print(f"\n{'-'*40}")
+            print(f"📂 正在处理文件夹：[{folder_name}]")
+            
+            folder_path = os.path.join(current_dir, folder_name)
+            folder_abs_path = os.path.abspath(folder_path)
+            print(f"   文件夹绝对路径：{folder_abs_path}")
+            if not os.path.isdir(folder_abs_path):
+                print(f"   ⚠️  跳过：文件夹不存在")
+                continue
+            
+            try:
+                display_name = config.get(folder_name, 'LocalizedResourceName', fallback=folder_name).strip()
+                icon_rel_path = config.get(folder_name, 'IconResource', fallback='').strip()
+                print(f"   显示名：{display_name}")
+                print(f"   配置的相对路径：{icon_rel_path}")
+            except Exception as e:
+                print(f"   ⚠️  跳过：配置项错误 - {str(e)}")
+                continue
+            
+            if not icon_rel_path or not icon_rel_path.lower().endswith('.exe'):
+                print(f"   ⚠️  跳过：IconResource无效（非EXE文件）")
+                continue
+            
+            final_icon_path = os.path.normpath(os.path.join(folder_abs_path, icon_rel_path))
+            print(f"   拼接后的绝对路径：{final_icon_path}")
+            
+            if not os.path.exists(final_icon_path) or not os.path.isfile(final_icon_path):
+                print(f"   ⚠️  跳过：EXE文件不存在或不是有效文件")
+                continue
+            
+            ini_path = os.path.join(folder_abs_path, "desktop.ini")
+            if ensure_file_writable(ini_path):
+                try:
+                    with open(ini_path, 'w', encoding='ANSI', newline='\r\n') as f:
+                        f.write("[.ShellClassInfo]\r\n")
+                        f.write(f"LocalizedResourceName={display_name}\r\n")
+                        f.write(f"IconResource={final_icon_path},0\r\n")
+                    
+                    win32api.SetFileAttributes(
+                        ini_path,
+                        win32con.FILE_ATTRIBUTE_HIDDEN | win32con.FILE_ATTRIBUTE_SYSTEM
+                    )
+                    print(f"   ✅ 成功生成desktop.ini")
+                    processed += 1
+                except Exception as e:
+                    print(f"   ❌ 生成失败：{str(e)}")
+        
+        print(f"\n{'-'*60}")
+        print(f"📊 处理结果：成功 {processed}/{total} 个文件夹")
+        print(f"⚠️  提示：请执行选项6刷新图标以生效")
+    except Exception as e:
+        print(f"❌ 总错误：{str(e)}")
+    finally:
+        wait_for_space()
+
 
 def clean_desktop_ini():
+    """清理desktop.ini"""
     try:
-        print("\n----- 开始清理desktop.ini -----")
+        print("\n" + "-" * 40)
+        print("          清理 desktop.ini          ")
+        print("-" * 40)
         current_dir = OPERATE_DIR
         deleted = 0
-        affected_roots = set()
-
+        
         for root, _, files in os.walk(current_dir):
             for file in files:
-                if file == 'desktop.ini' or file.startswith('desktop.ini.bak'):
+                if file == "desktop.ini":
                     file_path = os.path.join(root, file)
-                    try:
-                        if ensure_file_writable(file_path):
+                    if ensure_file_writable(file_path):
+                        try:
                             os.remove(file_path)
                             deleted += 1
-                            affected_roots.add(root)
-                            print(f"已删除：{os.path.relpath(file_path, current_dir)}")
-                    except Exception as e:
-                        print(f"删除失败 {os.path.relpath(file_path, current_dir)}：{str(e)}")
+                            print(f"✅ 已删除：{os.path.relpath(file_path, current_dir)}")
+                        except Exception as e:
+                            print(f"❌ 删除失败 {file_path}：{str(e)}")
         
-        if affected_roots:
-            print("\n开始批量刷新受影响的目录...")
-            for root in affected_roots:
-                refresh_folder(root)
-            print(f"已刷新 {len(affected_roots)} 个目录")
-        
-        print(f"\n清理完成，共删除 {deleted} 个文件")
+        print(f"\n📊 清理完成：共删除 {deleted} 个文件")
+        print(f"⚠️  提示：请执行选项6刷新图标以生效")
     except Exception as e:
-        print(f"清理desktop.ini失败：{str(e)}")
+        print(f"❌ 清理失败：{str(e)}")
     finally:
         wait_for_space()
 
-def clean_extracted_icons():
-    try:
-        print("\n----- 开始清理ICO图标 -----")
-        current_dir = OPERATE_DIR
-        folders_txt_path = os.path.join(current_dir, 'folders.txt')
-        if not os.path.exists(folders_txt_path):
-            print("错误：未找到folders.txt，请先执行步骤1")
-            return
-
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        config.read(folders_txt_path, encoding='utf-8')
-        deleted = 0
-        affected_folders = set()
-
-        for folder in config.sections():
-            folder_path = os.path.join(current_dir, folder)
-            exe_rel_path = config.get(folder, 'IconResource', fallback='')
-            if not exe_rel_path or not exe_rel_path.lower().endswith('.exe'):
-                continue
-
-            exe_basename = os.path.basename(exe_rel_path)
-            ico_name = f"{os.path.splitext(exe_basename)[0]}{ICON_EXTENSION}"
-            ico_abs_path = os.path.join(folder_path, ico_name)
-
-            if os.path.exists(ico_abs_path):
-                try:
-                    os.remove(ico_abs_path)
-                    deleted += 1
-                    affected_folders.add(folder_path)
-                    print(f"已删除：{os.path.relpath(ico_abs_path, current_dir)}")
-                except Exception as e:
-                    print(f"删除失败 {os.path.relpath(ico_abs_path, current_dir)}：{str(e)}")
-        
-        if affected_folders:
-            print("\n开始批量刷新受影响的文件夹...")
-            for folder in affected_folders:
-                refresh_folder(folder)
-            print(f"已刷新 {len(affected_folders)} 个文件夹")
-        
-        print(f"\n清理完成，共删除 {deleted} 个ICO文件")
-    except Exception as e:
-        print(f"清理ICO图标失败：{str(e)}")
-    finally:
-        wait_for_space()
 
 # ------------------------------
-# 主菜单
+# 手动刷新功能（核心流程）
+# ------------------------------
+def manual_refresh_all():
+    """循环处理文件夹（含缓存生成）+ 最终系统缓存清理"""
+    try:
+        print("\n" + "-" * 60)
+        print("          刷新所有文件夹并清理系统缓存          ")
+        print("-" * 60)
+        
+        current_dir = OPERATE_DIR
+        folders = [
+            f for f in os.listdir(current_dir)
+            if os.path.isdir(os.path.join(current_dir, f)) and not f.startswith('.')
+        ]
+        
+        total = len(folders)
+        if total == 0:
+            print("ℹ️  没有找到可刷新的文件夹")
+            return
+        
+        print(f"即将处理 {total} 个文件夹（含缓存生成）...\n")
+        success_count = 0
+        cache_fail_count = 0  # 统计缓存生成失败次数
+        
+        for i, folder in enumerate(folders, 1):
+            folder_path = os.path.join(current_dir, folder)
+            print(f"[{i}/{total}] 处理文件夹：{folder}")
+            
+            # 刷新文件夹并触发缓存生成（返回两个状态：整体刷新成功/缓存生成成功）
+            refresh_success, cache_success = refresh_folder(folder_path)
+            
+            if refresh_success:
+                success_count += 1
+                if not cache_success:
+                    cache_fail_count += 1
+                    # 仅在失败次数较少时提示，避免刷屏
+                    if cache_fail_count <= 5:
+                        print(f"   ⚠️  缓存生成临时失败，最终清理会修复")
+                    elif cache_fail_count == 6:
+                        print(f"   ⚠️  更多缓存失败将不再提示，最终清理会统一处理")
+                else:
+                    print(f"   ✅ 刷新及缓存生成成功")
+            else:
+                print(f"   ⚠️  文件夹刷新失败")
+            
+            time.sleep(0.1)  # 控制节奏，避免系统压力
+        
+        print(f"\n{'-'*40}")
+        print(f"📊 文件夹处理结果：成功 {success_count}/{total} 个")
+        if cache_fail_count > 0:
+            print(f"   ℹ️  缓存生成临时失败 {cache_fail_count} 次，将通过最终清理修复")
+        
+        # 最终系统级缓存清理（确保所有图标生效）
+        refresh_system_icon_cache()
+        
+        print(f"\n{'-'*60}")
+        print("✅ 所有操作已完成")
+    except Exception as e:
+        print(f"❌ 刷新失败：{str(e)}")
+        subprocess.Popen(["explorer.exe"])  # 确保系统外壳启动
+        time.sleep(1)
+        subprocess.Popen(["explorer.exe", OPERATE_DIR])
+    finally:
+        wait_for_space()
+
+
+# ------------------------------
+# 主函数
 # ------------------------------
 def main():
-    global OPERATE_DIR
     try:
-        OPERATE_DIR = select_operate_directory()
-        if not OPERATE_DIR or not os.path.isdir(OPERATE_DIR):
-            print("未选择有效目录，程序退出")
+        if not check_dependency():
+            wait_for_space()
+            return
+        
+        select_operate_directory()
+        if not OPERATE_DIR:
+            print("❌ 未选择有效目录，退出")
             return
 
         while True:
-            print(f"\n===== 文件夹图标工具（当前操作目录：{OPERATE_DIR}）=====")
-            print("1. 生成folders.txt")
-            print("2. 手动编辑folders.txt")
-            print("3. 批量提取图标")
-            print("4. 生成desktop.ini")
-            print("5. 强制刷新视图")
-            print("6. 清理desktop.ini")
-            print("7. 清理ICO图标")
-            print("8. 退出")
+            print(f"\n" + "=" * 60)
+            print(f"          文件夹图标工具 {VERSION}（当前目录：{os.path.basename(OPERATE_DIR)}）          ")
+            print("=" * 60)
+            print("1. 清理 desktop.ini")
+            print("2. 生成 desktop.ini（不自动刷新）")
+            print("3. 交互生成 folders.txt [手动选择EXE]")
+            print("4. 自动生成 folders.txt [自动选择第一个EXE]")
+            print("5. 交互更新 folders.txt [仅添加新文件夹]")
+            print("6. 刷新所有文件夹并清理系统缓存（推荐）")
+            print("7. 退出")
             
-            choice = input("\n请选择操作(1-8)：").strip()
-            
+            choice = input("\n请输入操作序号（1-7）：").strip()
             if choice == '1':
-                generate_folders_txt()
-            elif choice == '2':
-                try:
-                    print("\n----- 手动编辑folders.txt -----")
-                    folders_txt_path = os.path.join(OPERATE_DIR, 'folders.txt')
-                    print(f"编辑路径：{folders_txt_path}")
-                    if os.path.exists(folders_txt_path):
-                        os.startfile(folders_txt_path)
-                    else:
-                        print("提示：folders.txt不存在，请先执行步骤1生成")
-                except Exception as e:
-                    print(f"打开文件失败：{str(e)}")
-                finally:
-                    wait_for_space()
-            elif choice == '3':
-                batch_extract_icons()
-            elif choice == '4':
-                generate_desktop_ini()
-            elif choice == '5':
-                try:
-                    print("\n----- 开始强制刷新视图 -----")
-                    current_dir = OPERATE_DIR
-                    count = 0
-                    for folder in os.listdir(current_dir):
-                        folder_path = os.path.join(current_dir, folder)
-                        if os.path.isdir(folder_path):
-                            if refresh_folder(folder_path):
-                                count += 1
-                    print(f"已刷新 {count} 个文件夹")
-                except Exception as e:
-                    print(f"强制刷新失败：{str(e)}")
-                finally:
-                    wait_for_space()
-            elif choice == '6':
                 clean_desktop_ini()
+            elif choice == '2':
+                generate_desktop_ini()
+            elif choice == '3':
+                generate_folders_txt_interactive()
+            elif choice == '4':
+                generate_folders_txt_auto()
+            elif choice == '5':
+                update_folders_txt_interactive()
+            elif choice == '6':
+                manual_refresh_all()
             elif choice == '7':
-                clean_extracted_icons()
-            elif choice == '8':
-                print("程序退出")
+                print("\n✅ 程序退出，感谢使用！")
                 break
             else:
-                print("无效选择，请输入1-8之间的数字")
+                print("❌ 请输入 1-7 之间的数字")
                 wait_for_space()
     except Exception as e:
-        print(f"程序主逻辑出错：{str(e)}")
+        print(f"❌ 程序出错：{str(e)}")
         wait_for_space()
 
+
+# ------------------------------
+# 程序入口
+# ------------------------------
 if __name__ == "__main__":
     if os.name != 'nt':
-        print("仅支持Windows系统")
-        print("按空格键退出...", end='', flush=True)
-        while True:
-            if msvcrt.getch() == b' ':
-                sys.exit(1)
+        print("❌ 错误：该工具仅支持 Windows 系统")
+        wait_for_space()
+        sys.exit(1)
+    
+    print(f"\n✅ 文件夹图标工具 {VERSION} 启动中，正在检查依赖...")
+    time.sleep(1)
     main()
