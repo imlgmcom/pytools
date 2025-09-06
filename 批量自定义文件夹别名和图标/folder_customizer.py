@@ -14,14 +14,39 @@ from win32com.shell.shell import SHChangeNotify
 from win32com.shell import shellcon
 
 # 版本信息
-VERSION = "v25.10.8 by DouBaoAi (修复缓存生成)"
+VERSION = "v25.10.8 by DouBaoAi"
 
 # 全局变量
 OPERATE_DIR = ""
 FOLDERS_TXT_NAME = "folders.txt"
 EXCLUDE_KEYWORDS = ["uninstall", "step"]
-FOLDERS_ENCODING = "gbk"  # Windows中文系统ANSI编码对应gbk
-
+#FOLDERS_ENCODING = "gbk"  # Windows中文系统ANSI编码对应gbk
+# 确定系统编码（扩展常见映射版）
+try:
+    # 调用Windows API获取ANSI代码页
+    cp = ctypes.windll.kernel32.GetACP()
+    
+    # 常见代码页与编码的映射关系（扩展至10个主要语言区域）
+    code_page_map = {
+        936: "gbk",        # 简体中文
+        65001: "utf-8",    # Unicode (UTF-8)
+        1252: "cp1252",    # 西欧语言（英语、法语、德语等）
+        950: "big5",       # 繁体中文
+        932: "shift_jis",  # 日语
+        949: "cp949",      # 韩语
+        1251: "cp1251",    # 俄语
+        1250: "cp1250",    # 中欧语言（波兰语、捷克语等）
+        1254: "cp1254",    # 土耳其语
+        874: "cp874"       # 泰语
+    }
+    
+    # 查找对应的编码，如果没有则使用默认
+    FOLDERS_ENCODING = code_page_map.get(cp, "gbk")
+    print(f"✅ 自动检测到系统编码: {FOLDERS_ENCODING} (代码页: {cp})")
+except Exception as e:
+    # 其他异常情况使用默认编码
+    FOLDERS_ENCODING = "gbk"
+    print(f"❌ 获取系统编码时发生错误: {e}，使用默认编码: {FOLDERS_ENCODING}")
 
 # ------------------------------
 # Windows API 基础定义
@@ -64,10 +89,7 @@ def check_dependency():
         ("win32api", "pywin32"),
         ("win32com.shell", "pywin32")
     ]
-    print("=" * 40)
-    print(f"          检查核心依赖 - {VERSION}          ")
-    print("=" * 40)
-    
+
     for module, install_name in required:
         try:
             __import__(module)
@@ -264,7 +286,9 @@ def refresh_system_icon_cache():
                     print(f"   删除缓存：{path}")
             except Exception as e:
                 print(f"   缓存删除失败 {path}：{str(e)}")
-        
+        time.sleep(2)
+        print("   重启资源管理器（系统外壳）...")
+        subprocess.Popen(["explorer.exe"])  
         # 额外清理：重建图标缓存数据库
         print("   重建系统图标缓存...")
         subprocess.run(
@@ -272,26 +296,19 @@ def refresh_system_icon_cache():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        time.sleep(1)
-        
-        # 修复任务栏显示：先启动系统外壳，再打开工作目录
-        print("   重启资源管理器（系统外壳）...")
-        subprocess.Popen(["explorer.exe"])  # 不带参数启动，优先恢复系统外壳（包括任务栏）
-        time.sleep(2)  # 等待系统外壳完全启动
-        
+        time.sleep(2)
         # 单独打开工作目录
         if OPERATE_DIR and os.path.isdir(OPERATE_DIR):
             print(f"   打开工作目录：{OPERATE_DIR}")
             subprocess.Popen(["explorer.exe", OPERATE_DIR])
-            time.sleep(1)
-        
+            time.sleep(2)
         print("✅ 系统图标缓存已重建，任务栏已恢复")
         return True
     except Exception as e:
         print(f"⚠️  系统缓存刷新失败：{str(e)}")
         # 确保资源管理器重启
         subprocess.Popen(["explorer.exe"])
-        time.sleep(1)
+        time.sleep(2)
         subprocess.Popen(["explorer.exe", OPERATE_DIR])
         return False
 
@@ -766,12 +783,11 @@ def manual_refresh_all():
         print("✅ 所有操作已完成")
     except Exception as e:
         print(f"❌ 刷新失败：{str(e)}")
-        subprocess.Popen(["explorer.exe"])  # 确保系统外壳启动
-        time.sleep(1)
         subprocess.Popen(["explorer.exe", OPERATE_DIR])
+        time.sleep(1)
+        subprocess.Popen(["explorer.exe"])  # 确保系统外壳启动
     finally:
         wait_for_space()
-
 
 # ------------------------------
 # 主函数
@@ -789,29 +805,35 @@ def main():
 
         while True:
             print(f"\n" + "=" * 60)
-            print(f"          文件夹图标工具 {VERSION}（当前目录：{os.path.basename(OPERATE_DIR)}）          ")
+            print(f"            文件夹图标工具 {VERSION}")
+            print(f"            （当前目录：{OPERATE_DIR}）")
             print("=" * 60)
             print("1. 清理 desktop.ini")
-            print("2. 生成 desktop.ini（不自动刷新）")
-            print("3. 交互生成 folders.txt [手动选择EXE]")
-            print("4. 自动生成 folders.txt [自动选择第一个EXE]")
-            print("5. 交互更新 folders.txt [仅添加新文件夹]")
-            print("6. 刷新所有文件夹并清理系统缓存（推荐）")
+            print("2. 交互生成 folders.txt [手动选择可执行文件]")
+            print("3. 生成 desktop.ini")
+            print("4. 刷新缓存")
+            print("")
+            print("5. 自动生成 folders.txt [自动选择可执行文件]")
+            print("6. 交互更新 folders.txt [仅加入新添加文件夹]")
+            print("")
             print("7. 退出")
+            print("")
+            print("⚠️ 建议执行顺序1>2>3>4")
+            print("⚠️ 生成folders.txt后可手动编辑别名")
             
             choice = input("\n请输入操作序号（1-7）：").strip()
             if choice == '1':
                 clean_desktop_ini()
             elif choice == '2':
-                generate_desktop_ini()
-            elif choice == '3':
                 generate_folders_txt_interactive()
+            elif choice == '3':
+                generate_desktop_ini()
             elif choice == '4':
-                generate_folders_txt_auto()
-            elif choice == '5':
-                update_folders_txt_interactive()
-            elif choice == '6':
                 manual_refresh_all()
+            elif choice == '5':
+                generate_folders_txt_auto()
+            elif choice == '6':
+                update_folders_txt_interactive()
             elif choice == '7':
                 print("\n✅ 程序退出，感谢使用！")
                 break
@@ -832,6 +854,6 @@ if __name__ == "__main__":
         wait_for_space()
         sys.exit(1)
     
-    print(f"\n✅ 文件夹图标工具 {VERSION} 启动中，正在检查依赖...")
-    time.sleep(1)
+    print(f"\n✅ 文件夹图标工具 {VERSION} ")
+    print(f"\n✅ 正在检查依赖...")
     main()
